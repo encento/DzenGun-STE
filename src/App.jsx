@@ -693,8 +693,7 @@ export default function App() {
         </div>
 
         <div className="mt-6 text-xs text-slate-500">
-          Логика: <code>#E_STARTT</code> → ожидание <code>#G_STATE=2</code> (0/1 считаем фальстарты)
-          → основной опрос <code>#G_SNUM</code> и адресный <code>#G_STIME=&lt;uiId-1&gt;</code>.
+         Тестовая сборка v 0.98 от 13.11.2025
         </div>
       </div>
     </div>
