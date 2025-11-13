@@ -1,0 +1,20 @@
+{
+  "name": "Dzen Gun Timer",
+  "short_name": "DzenTimer",
+  "start_url": "/DzenFCKNGGun/",
+  "display": "standalone",
+  "background_color": "#020617",
+  "theme_color": "#020617",
+  "icons": [
+    {
+      "src": "/DzenFCKNGGun/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/DzenFCKNGGun/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
