@@ -444,37 +444,52 @@ export default function App() {
   }, [ble]);
 
   // Управление
-  const startSession = async () => {
-    if (running) return;
-    if (!ble.connected) {
-      ble.pushLog("Start skipped: BLE not connected");
-      return;
-    }
-    setRunning(true);
+ const startSession = async () => {
+  if (running) return;
+  if (!ble.connected) {
+    ble.pushLog("Start skipped: BLE not connected");
+    return;
+  }
+  setRunning(true);
 
-    shotsMapRef.current.clear();
-    fsSetRef.current.clear();
-    pendingRef.current.clear();
-    snumCacheRef.current = { value: 0, ts: 0 };
-    setShots([]);
-    setDevState(0);
+  // локально чистим всё
+  shotsMapRef.current.clear();
+  fsSetRef.current.clear();
+  pendingRef.current.clear();
+  snumCacheRef.current = { value: 0, ts: 0 };
+  setShots([]);
+  setDevState(0);
 
+  try {
+    // 👉 ЖЁСТКО СБРАСЫВАЕМ УПРАЖНЕНИЕ НА УСТРОЙСТВЕ
     try {
-      if (modeUi === "fixed") {
-        await ble.setTMin(5000);
-        await ble.setTMax(5000);
-      } else {
-        await ble.setTMin(5000);
-        await ble.setTMax(10000);
-      }
-      ble.pushLog("BEEP sent (#E_STARTT)");
-      await ble.startDevice();
-      await sleep(120);
-      await startPollingShots();
+      await ble.toStandby(); // #S_STB
+      await sleep(50);
+      await ble.toReady();   // #S_GRD
+      ble.pushLog("Device reset to STANDBY→READY before start");
     } catch (e) {
-      ble.pushLog("Start error: " + (e?.message || e));
+      ble.pushLog("Device reset warning: " + (e?.message || e));
     }
-  };
+
+    // Настройки таймера
+    if (modeUi === "fixed") {
+      await ble.setTMin(5000);
+      await ble.setTMax(5000);
+    } else {
+      await ble.setTMin(5000);
+      await ble.setTMax(10000);
+    }
+
+    ble.pushLog("BEEP sent (#E_STARTT)");
+    await ble.startDevice();
+    await sleep(120);
+
+    await startPollingShots();
+  } catch (e) {
+    ble.pushLog("Start error: " + (e?.message || e));
+  }
+};
+
 
   const stopOnly = async () => {
     setRunning(false);
