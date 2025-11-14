@@ -68,7 +68,6 @@ function useBleHm10() {
 
   const writeLine = useCallback(
     async (cmd) => {
-      // гарантируем \r в конце
       const text = cmd.endsWith("\r") ? cmd : cmd + "\r";
       writeQ.current = writeQ.current
         .then(async () => {
@@ -91,7 +90,6 @@ function useBleHm10() {
     async (startsWith, timeoutMs = 1500) => {
       const start = Date.now();
       for (;;) {
-        // ищем подходящую строку
         const idx = rxLinesRef.current.findIndex((ln) =>
           ln.startsWith(startsWith)
         );
@@ -157,7 +155,7 @@ function useBleHm10() {
 
   const getState = useCallback(async () => {
     await writeLine("#G_STATE");
-    const line = await waitForLine("#G_STATE=", 1500);
+    const line = await waitForLine("#G_STATE=", 2000);
     const m = line.match(/^#G_STATE\s*=\s*(\d+)/);
     const val = m ? parseInt(m[1], 10) : NaN;
     if (!Number.isFinite(val)) throw new Error("Bad G_STATE");
@@ -166,7 +164,7 @@ function useBleHm10() {
 
   const getShotCount = useCallback(async () => {
     await writeLine("#G_SNUM");
-    const line = await waitForLine("#G_SNUM=", 1500);
+    const line = await waitForLine("#G_SNUM=", 2500);
     const m = line.match(/^#G_SNUM\s*=\s*(\d+)/);
     const val = m ? parseInt(m[1], 10) : NaN;
     if (!Number.isFinite(val)) throw new Error("Bad G_SNUM");
@@ -175,9 +173,8 @@ function useBleHm10() {
 
   const getShotTime = useCallback(
     async (devId) => {
-      // devId — реальный индекс на железке
       await writeLine(`#G_STIME=${devId}`);
-      const line = await waitForLine("#G_STIME=", 2000);
+      const line = await waitForLine("#G_STIME=", 2500);
       const m = line.match(/^#G_STIME\s*=\s*(\d+)/);
       const val = m ? parseInt(m[1], 10) : NaN;
       if (!Number.isFinite(val)) throw new Error("Bad G_STIME");
@@ -202,15 +199,12 @@ function useBleHm10() {
 
   const startDevice = useCallback(async () => {
     await writeLine("#E_STARTT");
-    // Ответ #E_STARTT=OK можем поймать, но не обязательно ждать —
-    // многие контроллеры шлют его в фоне.
   }, [writeLine]);
 
   const clearExercise = useCallback(async () => {
-    // будущая команда прошивки — на данный момент будет отвечать ошибкой.
+    // будущая команда прошивки — пока просто шлём, игнорируем ошибки
     try {
       await writeLine("#E_CLR");
-      // можем попытаться поймать #E_CLR=OK, но пока не заморачиваемся
     } catch (e) {
       pushLog("E_CLR not supported yet: " + (e?.message || e));
     }
@@ -240,32 +234,32 @@ function useBleHm10() {
 export default function App() {
   const ble = useBleHm10();
 
-  // UI настройки
   const [modeUi, setModeUi] = useState("fixed"); // fixed | random
 
-  // состояние устройства
   const [devState, setDevState] = useState(0); // 0 READY,1 WAIT,2 STARTED
 
-  // сессия
   const [shots, setShots] = useState([]); // [{uiId, ms, split, fs}]
   const [running, setRunning] = useState(false);
   const [beepSent, setBeepSent] = useState(false);
 
   const runningRef = useRef(false);
   const pollingRef = useRef(false);
-  const sessionBaseRef = useRef(0); // базовый G_SNUM на момент старта
+  const sessionBaseRef = useRef(0);
 
-  // карта выстрелов для быстрого доступа
-  const shotsMapRef = useRef(new Map()); // uiId -> { uiId, ms, split, fs }
+  const shotsMapRef = useRef(new Map());
 
   /* ====== метрики / график ====== */
 
+  // 1-й выстрел — t от beep, остальные — split; FS не рисуем
   const chartData = useMemo(
     () =>
-      shots.map((s) => ({
-        seq: s.uiId,
-        split: s.fs ? null : s.split,
-      })),
+      shots.map((s) => {
+        if (s.fs) return { seq: s.uiId, value: null };
+        if (s.uiId === 1) {
+          return { seq: s.uiId, value: s.ms };
+        }
+        return { seq: s.uiId, value: s.split };
+      }),
     [shots]
   );
 
@@ -325,13 +319,11 @@ export default function App() {
     (uiId, ms, fs) => {
       const existing = shotsMapRef.current.get(uiId);
       if (existing) {
-        // если уже есть и ms совпадает — игнорируем
         if (existing.ms === ms && existing.fs === fs) return;
-        // если существующий без времени, а тут пришло время — обновляем
         existing.ms = ms;
-        existing.fs = fs;
+        if (fs != null) existing.fs = fs;
       } else {
-        shotsMapRef.current.set(uiId, { uiId, ms, split: null, fs });
+        shotsMapRef.current.set(uiId, { uiId, ms, split: null, fs: !!fs });
       }
       recalcSplits();
     },
@@ -340,17 +332,13 @@ export default function App() {
 
   const reserveFsShot = useCallback(
     (uiId) => {
-      // для фальстарта резервируем без времени
       if (!shotsMapRef.current.has(uiId)) {
         shotsMapRef.current.set(uiId, { uiId, ms: null, split: null, fs: true });
-        recalcSplits();
       } else {
         const s = shotsMapRef.current.get(uiId);
-        if (!s.fs) {
-          s.fs = true;
-          recalcSplits();
-        }
+        s.fs = true;
       }
+      recalcSplits();
     },
     [recalcSplits]
   );
@@ -358,16 +346,24 @@ export default function App() {
   /* ===== ожидание BEEP и фальстарты ===== */
 
   const waitUntilBeepAndCollectFS = useCallback(async () => {
-    // baseline до начала ожидания
     let baseline = 0;
     try {
-      baseline = await ble.getShotCount();
+      for (let i = 0; i < 3; i++) {
+        try {
+          baseline = await ble.getShotCount();
+          break;
+        } catch (eInner) {
+          if (i === 2) throw eInner;
+          await sleep(200);
+        }
+      }
+      ble.pushLog(`FS: baseline SNUM before beep = ${baseline}`);
     } catch (e) {
       ble.pushLog("FS baseline SNUM read error: " + (e?.message || e));
       baseline = 0;
     }
+
     let lastSnum = baseline;
-    ble.pushLog(`FS: baseline SNUM before beep = ${baseline}`);
 
     for (;;) {
       const state = await ble.getState();
@@ -378,7 +374,6 @@ export default function App() {
         return true;
       }
 
-      // пока не STARTED, смотрим на новые выстрелы → фальстарты
       let snum = 0;
       try {
         snum = await ble.getShotCount();
@@ -406,12 +401,9 @@ export default function App() {
     async () => {
       const state = await ble.getState();
       setDevState(state);
-      if (state !== 2) {
-        // упражнение ещё не идёт
-        return;
-      }
+      if (state !== 2) return;
 
-      const devSnum = await ble.getShotCount(); // общее количество выстрелов на железке
+      const devSnum = await ble.getShotCount();
       const base = sessionBaseRef.current || 0;
 
       const sessionCount = Math.max(0, devSnum - base);
@@ -423,14 +415,12 @@ export default function App() {
 
       for (let uiId = 1; uiId <= sessionCount; uiId++) {
         const existing = shotsMapRef.current.get(uiId);
-        // если уже есть время (и/или флаг fs), не трогаем
         if (existing && existing.ms != null) continue;
 
         const devId = base + (uiId - 1);
 
         try {
           const ms = await ble.getShotTime(devId);
-          // если вдруг это дубликат времени — допустим, просто обновим
           addShotMs(uiId, ms, existing?.fs ?? false);
         } catch (e) {
           ble.pushLog(
@@ -476,24 +466,34 @@ export default function App() {
     resetSessionState();
     setDevState(0);
 
-    // Логический «вайп» — baseline по G_SNUM
+    // будущий хард-reset упражнения на железке
     try {
-      // пробуем будущую команду очистки — она пока может отдавать ERR
       await ble.clearExercise();
     } catch (e) {
       ble.pushLog("E_CLR error (ignored for now): " + (e?.message || e));
     }
 
     try {
-      const base = await ble.getShotCount();
-      sessionBaseRef.current = base;
-      ble.pushLog(`Session baseline SNUM = ${base}`);
-    } catch (e) {
-      sessionBaseRef.current = 0;
-      ble.pushLog("Session baseline SNUM read error: " + (e?.message || e));
-    }
+      let base = 0;
+      try {
+        for (let i = 0; i < 3; i++) {
+          try {
+            base = await ble.getShotCount();
+            break;
+          } catch (eInner) {
+            if (i === 2) throw eInner;
+            await sleep(200);
+          }
+        }
+        sessionBaseRef.current = base;
+        ble.pushLog(`Session baseline SNUM = ${base}`);
+      } catch (e) {
+        sessionBaseRef.current = 0;
+        ble.pushLog(
+          "Session baseline SNUM read error: " + (e?.message || e)
+        );
+      }
 
-    try {
       // таймер
       if (modeUi === "fixed") {
         await ble.setTMin(5000);
@@ -503,16 +503,13 @@ export default function App() {
         await ble.setTMax(10000);
       }
 
-      // Бип
       await ble.startDevice();
       ble.pushLog("BEEP sent (#E_STARTT)");
       setBeepSent(true);
 
-      // ждём перехода в STARTED + ловим фальстарты
       const ok = await waitUntilBeepAndCollectFS();
       if (!ok) throw new Error("waitUntilBeepAndCollectFS returned false");
 
-      // запускаем поллинг
       startPolling();
     } catch (e) {
       ble.pushLog("Start error: " + (e?.message || e));
@@ -534,17 +531,15 @@ export default function App() {
     pollingRef.current = false;
     setRunning(false);
     ble.pushLog("Stop");
-    // ничего не чистим — таблица результата остаётся
   }, [ble]);
 
-  /* ===== клавиатура (Space как выстрел-эмуляция) — пока оставим ===== */
+  /* ===== клавиатура (dev) ===== */
 
   useEffect(() => {
     const onKey = (e) => {
       if (e.code === "Space") {
         e.preventDefault();
-        // эмуляция очередного выстрела — только для отладки без железа
-        // в бою ты этим не пользуешься, но оставим как dev-инструмент
+        // dev-хук, сейчас не используем
       }
     };
     window.addEventListener("keydown", onKey);
@@ -726,7 +721,7 @@ export default function App() {
                   <tr>
                     <th className="text-left font-medium py-2">#</th>
                     <th className="text-left font-medium py-2">
-                      t от Beep / FS
+                      t от beep / FS
                     </th>
                     <th className="text-left font-medium py-2">Split</th>
                   </tr>
@@ -799,19 +794,25 @@ export default function App() {
                   />
                   <Line
                     type="monotone"
-                    dataKey="split"
-                    name="Split"
+                    dataKey="value"
+                    name="Tempo"
                     dot
                     stroke="#22c55e"
+                    connectNulls={false}
                   />
                 </LineChart>
               </ResponsiveContainer>
             </div>
             <div className="text-xs text-slate-400 mt-2">
-              Первый выстрел без Split, далее сплиты между «живыми» выстрелами
-              (FS в расчёт не идут).
+              Первый выстрел — First Shot (от beep), остальные — Split. FS —
+              выстрел до beep (в график не попадает).
             </div>
           </div>
+        </div>
+
+        {/* футер с версией */}
+        <div className="mt-6 text-center text-xs text-slate-500">
+          Version · v0.9806
         </div>
       </div>
     </div>
