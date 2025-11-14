@@ -272,15 +272,16 @@ export default function App() {
     [shots]
   );
 
-  const chartData = useMemo(
-    () =>
-      shots.map((s) => ({
-        seq: s.seq,
-        split: s.seq === 1 ? null : s.split,
-        fs: null,
-      })),
-    [shots]
-  );
+// Для графика: точка #1 = First Shot (абсолютное время от beep),
+// остальные точки = Split между выстрелами
+const chartData = useMemo(() => {
+  if (!shots.length) return [];
+  return shots.map((s, idx) => ({
+    seq: s.seq,
+    value: idx === 0 ? s.ms : s.split, // 1-й выстрел — ms, дальше — split
+  }));
+}, [shots]);
+
 
   // ===== опрос =====
 
@@ -669,22 +670,24 @@ export default function App() {
                       `${(v / 1000).toFixed(2)}s`
                     }
                   />
-                  <Tooltip
-                    formatter={(v) => msFmt(Number(v))}
-                    labelFormatter={(l) => `#${l}`}
-                    contentStyle={{
-                      background: "#020617",
-                      border: "1px solid #1e293b",
-                      color: "#e2e8f0",
-                    }}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="split"
-                    name="Split"
-                    dot
-                    stroke="#22c55e"
-                  />
+              <Tooltip
+  formatter={(v) => msFmt(Number(v))}
+  labelFormatter={(l) => `#${l}`}
+  contentStyle={{
+    background: "#020617",
+    border: "1px solid #1e293b",
+    color: "#e2e8f0",
+  }}
+/>
+
+                 <Line
+  type="monotone"
+  dataKey="value"
+  name="Tempo"
+  dot
+  stroke="#22c55e"
+/>
+
                 </LineChart>
               </ResponsiveContainer>
             </div>
@@ -696,7 +699,7 @@ export default function App() {
         </div>
 
         <div className="mt-4 text-xs text-slate-500">
-          LaserTimer UI v0.9805
+          LaserTimer UI v0.9807
         </div>
       </div>
     </div>
