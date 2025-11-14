@@ -87,25 +87,70 @@ export default function App() {
     return writeQRef.current;
   };
 
-  /* ---- protocol state for exercise ---- */
+  /* ---- протокол упражнения ---- */
 
   const [mode, setMode] = useState("fixed"); // fixed / random
   const [running, setRunning] = useState(false);
-  const [exeState, setExeState] = useState(0); // 0,1,2
+  const [exeState, setExeState] = useState(0); // 0 READY, 1 BEEP_WAITING, 2 STARTED
+  const [shotCount, setShotCount] = useState(0);
 
   const [shots, setShots] = useState([]); // [{seq, tMs, splitMs}]
 
-  const snumRef = useRef(0);
-  const shotMapRef = useRef({}); // devId -> { ms }
-  const stimeQueueRef = useRef([]); // devId[]
-  const stimeBusyRef = useRef(false);
   const pollTimerRef = useRef(null);
 
-  const exeLabel = useMemo(() => {
-    if (exeState === 1) return "Отсчёт";
-    if (exeState === 2) return "Упражнение";
-    return "Ожидание";
-  }, [exeState]);
+  // "ожидальщики" для одного ответа (SNUM/STIME)
+  const waitersRef = useRef([]);
+
+  /* ---- helpers for waiters ---- */
+
+  const addWaiter = (matcher, timeoutMs = 1000) =>
+    new Promise((resolve, reject) => {
+      const w = {
+        matcher,
+        resolve,
+        reject,
+        timeoutId: null,
+      };
+      w.timeoutId = setTimeout(() => {
+        const idx = waitersRef.current.indexOf(w);
+        if (idx >= 0) waitersRef.current.splice(idx, 1);
+        reject(new Error("timeout"));
+      }, timeoutMs);
+      waitersRef.current.push(w);
+    });
+
+  const dispatchWaiters = (line) => {
+    const arr = waitersRef.current;
+    for (let i = 0; i < arr.length; i++) {
+      const w = arr[i];
+      const res = w.matcher(line);
+      if (res === null || res === undefined) continue;
+      arr.splice(i, 1);
+      clearTimeout(w.timeoutId);
+      w.resolve(res);
+      return true; // линия "съедена" waiter'ом
+    }
+    return false;
+  };
+
+  const waitForSnumOnce = () =>
+    addWaiter((line) => {
+      if (!line.startsWith("#G_SNUM=")) return null;
+      const n = parseInt(line.split("=")[1], 10);
+      if (!Number.isFinite(n)) return null;
+      setShotCount(n);
+      return n;
+    });
+
+  const waitForStimeOnce = () =>
+    addWaiter((line) => {
+      if (!line.startsWith("#G_STIME=")) return null;
+      const ms = parseInt(line.split("=")[1], 10);
+      if (!Number.isFinite(ms)) return null;
+      return ms;
+    });
+
+  /* ---- метрики ---- */
 
   const firstShotMs = shots.length ? shots[0].tMs : null;
   const totalTimeMs = shots.length
@@ -135,100 +180,35 @@ export default function App() {
     [shots]
   );
 
-  /* ---- helpers for shots ---- */
+  const exeLabel = useMemo(() => {
+    if (exeState === 1) return "Отсчёт";
+    if (exeState === 2) return "Упражнение";
+    return "Ожидание";
+  }, [exeState]);
 
-  const rebuildShotsFromMap = () => {
-    const entries = Object.entries(shotMapRef.current)
-      .map(([devIdStr, v]) => ({
-        devId: parseInt(devIdStr, 10),
-        ms: v.ms,
-      }))
-      .sort((a, b) => a.devId - b.devId);
-
-    const ui = [];
-    let prevMs = null;
-    for (let i = 0; i < entries.length; i++) {
-      const { ms } = entries[i];
-      const seq = i + 1;
-      const split = prevMs == null ? null : ms - prevMs;
-      prevMs = ms;
-      ui.push({ seq, tMs: ms, splitMs: split });
-    }
-    setShots(ui);
-  };
-
-  const kickStimeQueue = () => {
-    if (stimeBusyRef.current) return;
-    const devId = stimeQueueRef.current[0];
-    if (devId == null) return;
-    stimeBusyRef.current = true;
-    // спрашиваем время конкретного выстрела (0-based id)
-    writeLine(`#G_STIME=${devId}`).catch(() => {});
-  };
-
-  const handleSnum = (n) => {
-    if (!Number.isFinite(n)) return;
-    const prev = snumRef.current;
-    snumRef.current = n;
-    if (n <= prev) return;
-
-    // появились новые выстрелы: devId = prev .. n-1
-    for (let devId = prev; devId < n; devId++) {
-      if (shotMapRef.current[devId]) continue;
-      stimeQueueRef.current.push(devId);
-    }
-    kickStimeQueue();
-  };
-
-  const handleStime = (ms) => {
-    stimeBusyRef.current = false;
-    const devId = stimeQueueRef.current.shift();
-    if (devId == null) return;
-
-    if (!Number.isFinite(ms)) {
-      pushLog(
-        `Bad STIME for devId=${devId}: ${String(ms)}`
-      );
-      kickStimeQueue();
-      return;
-    }
-
-    // защита от дублей по миллисекундам
-    for (const v of Object.values(shotMapRef.current)) {
-      if (v.ms === ms) {
-        pushLog(
-          `Duplicate STIME ignored: devId=${devId}, ms=${ms}`
-        );
-        kickStimeQueue();
-        return;
-      }
-    }
-
-    shotMapRef.current[devId] = { ms };
-    rebuildShotsFromMap();
-    kickStimeQueue();
-  };
+  /* ---- RX handler ---- */
 
   const handleProtocolLine = (line) => {
     if (!line) return;
 
+    // сначала даём шанс waiter'ам
+    if (dispatchWaiters(line)) return;
+
     if (line.startsWith("#G_STATE=")) {
       const v = parseInt(line.split("=")[1], 10);
-      if (Number.isFinite(v)) {
-        setExeState(v);
-      }
+      if (Number.isFinite(v)) setExeState(v);
       return;
     }
 
     if (line.startsWith("#G_SNUM=")) {
       const n = parseInt(line.split("=")[1], 10);
-      handleSnum(n);
+      if (Number.isFinite(n)) setShotCount(n);
       return;
     }
 
     if (line.startsWith("#G_STIME=")) {
-      const ms = parseInt(line.split("=")[1], 10);
-      handleStime(ms);
+      // сюда обычно не попадём (STIME заберёт waiter),
+      // но оставим на всякий случай
       return;
     }
 
@@ -242,8 +222,6 @@ export default function App() {
       return;
     }
   };
-
-  /* ---- BLE RX handler ---- */
 
   const handleRxChunk = (value) => {
     const chunk = new TextDecoder().decode(value);
@@ -326,9 +304,8 @@ export default function App() {
     }
     pollTimerRef.current = setInterval(() => {
       if (!bleConnected) return;
-      // лёгкий опрос: состояние + число выстрелов
-      writeLine("#G_SNUM").catch(() => {});
       writeLine("#G_STATE").catch(() => {});
+      writeLine("#G_SNUM").catch(() => {});
     }, 250);
     pushLog("Poll: started");
   };
@@ -339,8 +316,6 @@ export default function App() {
       pollTimerRef.current = null;
       pushLog("Poll: stopped");
     }
-    stimeQueueRef.current = [];
-    stimeBusyRef.current = false;
   };
 
   useEffect(() => {
@@ -360,12 +335,9 @@ export default function App() {
     }
     if (running) return;
 
-    // чистим локальное состояние
-    snumRef.current = 0;
-    shotMapRef.current = {};
-    stimeQueueRef.current = [];
-    stimeBusyRef.current = false;
+    // чистим UI
     setShots([]);
+    setShotCount(0);
     setExeState(0);
 
     setRunning(true);
@@ -374,7 +346,7 @@ export default function App() {
     const tMax = mode === "fixed" ? 5000 : 10000;
 
     try {
-      // сброс устройства перед стартом
+      // сброс в READY перед стартом
       await writeLine("#S_GRD");
       await writeLine("#S_STB");
       pushLog(
@@ -395,21 +367,65 @@ export default function App() {
     startPolling();
   };
 
-  const handleStop = () => {
+  const handleStop = async () => {
     if (!running) return;
     setRunning(false);
     stopPolling();
     pushLog("Stop");
+
+    if (!bleConnected) return;
+
+    try {
+      // 1) узнаём сколько выстрелов накоплено
+      await writeLine("#G_SNUM");
+      const total = await waitForSnumOnce();
+      pushLog(`Stop: device reports ${total} shots`);
+
+      // 2) по очереди забираем времена STIME=0..N-1
+      const times = [];
+      for (let devId = 0; devId < total; devId++) {
+        await writeLine(`#G_STIME=${devId}`);
+        const ms = await waitForStimeOnce();
+
+        if (!Number.isFinite(ms)) continue;
+
+        // защита от дублей по миллисекундам
+        if (times.includes(ms)) {
+          pushLog(
+            `Duplicate STIME ignored: id=${devId}, ms=${ms}`
+          );
+          continue;
+        }
+
+        times.push(ms);
+      }
+
+      times.sort((a, b) => a - b);
+
+      const ui = [];
+      let prev = null;
+      for (let i = 0; i < times.length; i++) {
+        const ms = times[i];
+        const seq = i + 1;
+        const split = prev == null ? null : ms - prev;
+        prev = ms;
+        ui.push({ seq, tMs: ms, splitMs: split });
+      }
+
+      setShots(ui);
+      setShotCount(ui.length);
+    } catch (e) {
+      pushLog(
+        "Stop fetch error: " + (e?.message || String(e))
+      );
+    }
   };
 
   const handleReset = () => {
     setRunning(false);
     stopPolling();
-    snumRef.current = 0;
-    shotMapRef.current = {};
-    stimeQueueRef.current = [];
-    stimeBusyRef.current = false;
     setShots([]);
+    setShotCount(0);
     setExeState(0);
     pushLog("Reset (UI cleared)");
   };
@@ -539,7 +555,7 @@ export default function App() {
               />
               <StatCard
                 label="# Shots"
-                value={String(shots.length)}
+                value={String(shotCount)}
               />
               <StatCard
                 label="Total Time"
@@ -722,7 +738,7 @@ export default function App() {
 
         {/* footer version */}
         <div className="mt-6 text-xs text-slate-500">
-          Тестовая сборка v 0.9802 от 14.11.2025
+          Тестовая сборка v 0.9803 от 14.11.2025
         </div>
       </div>
     </div>
