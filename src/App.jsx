@@ -1,4 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   ResponsiveContainer,
   LineChart,
@@ -9,12 +14,15 @@ import {
   Tooltip,
 } from "recharts";
 
-/* ========= utils ========= */
-const msFmt = (ms) => (Number.isFinite(ms) ? (ms / 1000).toFixed(2) + " s" : "—");
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/* ===== utils ===== */
 
-/* ========= LG error codes ========= */
-const LG_ERR = {
+const msFmt = (ms) =>
+  Number.isFinite(ms) ? (ms / 1000).toFixed(2) + " s" : "—";
+
+const FFE0_SERVICE = "0000ffe0-0000-1000-8000-00805f9b34fb";
+const FFE1_CHAR = "0000ffe1-0000-1000-8000-00805f9b34fb";
+
+const COM_ERROR_NAMES = {
   0x00: "OK",
   0x01: "ERROR",
   0x02: "BUSY",
@@ -25,678 +33,622 @@ const LG_ERR = {
   0x07: "CRC_ERROR",
   0x08: "DATA_SIZE_ERROR",
   0x09: "UNSUPPORTED_PROTOCOL",
-  0x0A: "ID_OUT_OF_RANGE",
-  0x0B: "DATA_EMPTY",
-  0x0C: "DATA_IS_NOT_INT",
-  0xFF: "BUFFER_EMPTY",
+  0x0a: "ID_OUT_OF_RANGE",
+  0x0b: "DATA_EMPTY",
+  0x0c: "DATA_IS_NOT_INT",
+  0xff: "BUFFER_EMPTY",
 };
-function parseLgErr(line) {
-  const m = line.match(/#ERR\s*=\s*([0-9A-Fa-fx]+)/);
+
+function decodeErr(line) {
+  const m = line.match(/^#ERR=([0-9A-Fa-f]+)/);
   if (!m) return null;
   const raw = m[1];
-  const isHex = /^0x/i.test(raw) || /[A-Fa-f]/.test(raw);
-  const codeDec = isHex ? parseInt(raw.replace(/^0x/i, ""), 16) : parseInt(raw, 10);
-  const name = LG_ERR[codeDec] || "UNKNOWN";
-  return { codeDec, name, raw };
+  const code =
+    /^[0-9A-Fa-f]+$/.test(raw) && raw.length <= 2
+      ? parseInt(raw, 16)
+      : parseInt(raw, 10);
+  const name = COM_ERROR_NAMES[code] ?? "UNKNOWN";
+  return { code, name };
 }
-const isRetryableLgErr = (codeDec) =>
-  codeDec === 0x02 || codeDec === 0x03 || codeDec === 0x0B; // BUSY/TIMEOUT/DATA_EMPTY
 
-/* ========= BLE HM-10 ========= */
-const FFE0_SERVICE = "0000ffe0-0000-1000-8000-00805f9b34fb";
-const FFE1_CHAR = "0000ffe1-0000-1000-8000-00805f9b34fb";
+/* ===== main component ===== */
 
-function useBleHm10() {
-  const [supported] = useState(!!navigator.bluetooth);
-  const [connected, setConnected] = useState(false);
-  const [deviceName, setDeviceName] = useState("");
+export default function App() {
+  /* ---- BLE low-level state ---- */
+
+  const [bleSupported] = useState(!!navigator.bluetooth);
+  const [bleConnected, setBleConnected] = useState(false);
+  const [bleName, setBleName] = useState("");
   const [log, setLog] = useState([]);
 
   const deviceRef = useRef(null);
   const serverRef = useRef(null);
-  const txrxRef = useRef(null);
-  const writeQ = useRef(Promise.resolve());
+  const txCharRef = useRef(null);
+  const writeQRef = useRef(Promise.resolve());
+  const rxBufRef = useRef("");
 
-  const rxBuf = useRef("");
-  const rxLinesRef = useRef([]);
-  const waitersRef = useRef([]);
+  const pushLog = (s) =>
+    setLog((a) => [s, ...a].slice(0, 600));
 
-  const pushLog = useCallback((s) => setLog((a) => [s, ...a].slice(0, 1200)), []);
-
-  const writeLine = useCallback(async (text) => {
+  const writeLine = (text) => {
     const withTerm = text.endsWith("\r") ? text : text + "\r";
-    writeQ.current = writeQ.current
+    writeQRef.current = writeQRef.current
       .then(async () => {
-        const ch = txrxRef.current;
+        const ch = txCharRef.current;
         if (!ch) throw new Error("TX not ready");
         pushLog("TX " + text);
-        await ch.writeValue(new TextEncoder().encode(withTerm));
+        await ch.writeValue(
+          new TextEncoder().encode(withTerm)
+        );
       })
-      .catch((e) => pushLog("TX ERROR: " + (e?.message || e)));
-    return writeQ.current;
-  }, [pushLog]);
-
-  const onRxLine = useCallback((line) => {
-    rxLinesRef.current.push(line);
-    waitersRef.current = waitersRef.current.filter((w) => {
-      if (w.deadline && Date.now() > w.deadline) {
-        w.reject(new Error("timeout"));
-        return false;
-      }
-      if (w.test(line)) {
-        w.resolve(line);
-        return false;
-      }
-      return true;
-    });
-  }, []);
-
-  const onRxChunk = useCallback(
-    (dv) => {
-      const chunk = new TextDecoder().decode(dv);
-      rxBuf.current += chunk;
-      for (;;) {
-        const iR = rxBuf.current.indexOf("\r");
-        const iN = rxBuf.current.indexOf("\n");
-        if (iR < 0 && iN < 0) break;
-        const sep = iR >= 0 && iN >= 0 ? Math.min(iR, iN) : Math.max(iR, iN);
-        const line = rxBuf.current.slice(0, sep).trim();
-        rxBuf.current = rxBuf.current.slice(sep + 1);
-        if (line) {
-          pushLog("RX: " + line);
-          onRxLine(line);
-        }
-      }
-    },
-    [pushLog, onRxLine]
-  );
-
-  const waitForLine = useCallback((predicate, timeoutMs = 1200) => {
-    return new Promise((resolve, reject) => {
-      for (let i = rxLinesRef.current.length - 1; i >= 0; i--) {
-        const ln = rxLinesRef.current[i];
-        if (predicate(ln)) return resolve(ln);
-      }
-      const deadline = timeoutMs ? Date.now() + timeoutMs : 0;
-      waitersRef.current.push({ test: predicate, resolve, reject, deadline });
-      if (timeoutMs) {
-        setTimeout(() => {
-          waitersRef.current = waitersRef.current.filter((w) => {
-            if (w.deadline && Date.now() > w.deadline) {
-              w.reject(new Error("timeout"));
-              return false;
-            }
-            return true;
-          });
-        }, timeoutMs + 40);
-      }
-    });
-  }, []);
-
-  // команды таймера и состояния
-  const setTMin = useCallback(async (ms) => { await writeLine(`#S_TMIN=${ms | 0}`); }, [writeLine]);
-  const setTMax = useCallback(async (ms) => { await writeLine(`#S_TMAX=${ms | 0}`); }, [writeLine]);
-
-  const startDevice = useCallback(async () => {
-    await writeLine(`#E_STARTT`);
-    try { await waitForLine((ln) => /E_STARTT/i.test(ln) && /OK/i.test(ln), 800); } catch {}
-  }, [writeLine, waitForLine]);
-
-  const toStandby = useCallback(async () => { await writeLine(`#S_STB`); }, [writeLine]);
-  const toReady   = useCallback(async () => { await writeLine(`#S_GRD`); }, [writeLine]);
-
-  const getShotCount = useCallback(async () => {
-    await writeLine(`#G_SNUM`);
-    const line = await waitForLine((ln) => /(SNUM|#G_SNUM)\s*=\s*\d+/i.test(ln), 1500);
-    const m = line.match(/=\s*(\d+)/);
-    return m ? parseInt(m[1], 10) : 0;
-  }, [writeLine, waitForLine]);
-
-  // uiId: 1..SNUM → devId: 0..SNUM-1
-  const getShotTimeById = useCallback(async (uiId) => {
-    const devId = uiId - 1;
-    if (devId < 0) return { id: uiId, ms: null, err: 0x06 };
-    await writeLine(`#G_STIME=${devId}`);
-    const line = await waitForLine((ln) => /(#ERR|STIME|#G_STIME)\s*=/.test(ln), 1500);
-
-    const parsedErr = parseLgErr(line);
-    if (parsedErr) {
-      const { codeDec, name } = parsedErr;
-      pushLog(`ERR ${name} (0x${codeDec.toString(16).toUpperCase()}) on STIME uiId=${uiId} (devId=${devId})`);
-      return { id: uiId, ms: null, err: codeDec };
-    }
-    const m = line.match(/(?:STIME|#G_STIME)\s*=\s*(\d+)/i) || line.match(/(\d+)/);
-    const ms = m ? parseInt(m[1], 10) : null;
-    return { id: uiId, ms, err: null };
-  }, [writeLine, waitForLine, pushLog]);
-
-  const getState = useCallback(async () => {
-    await writeLine(`#G_STATE`);
-    const line = await waitForLine((ln) => /(G_STATE|#G_STATE)\s*=\s*\d+/i.test(ln), 1200);
-    const m = line.match(/=\s*(\d+)/);
-    return m ? parseInt(m[1], 10) : 0;
-  }, [writeLine, waitForLine]);
-
-  const connectClick = useCallback(async (ev) => {
-    ev?.preventDefault?.(); ev?.stopPropagation?.();
-    try {
-      const device = await navigator.bluetooth.requestDevice({
-        acceptAllDevices: true,
-        optionalServices: [FFE0_SERVICE, "generic_access", "generic_attribute"],
-      });
-      deviceRef.current = device;
-      setDeviceName(device.name || device.id || "BLE device");
-      pushLog("Chooser: device selected");
-
-      const server = await device.gatt.connect();
-      serverRef.current = server;
-      pushLog("GATT: connected");
-
-      const svc = await server.getPrimaryService(FFE0_SERVICE);
-      const ch  = await svc.getCharacteristic(FFE1_CHAR);
-      txrxRef.current = ch;
-
-      if (ch.properties.notify) {
-        await ch.startNotifications();
-        ch.addEventListener("characteristicvaluechanged", (e) => onRxChunk(e.target.value));
-        pushLog("FFE1: notifications started");
-      } else {
-        pushLog("FFE1: notify not supported");
-      }
-
-      setConnected(true);
-      pushLog("HM-10 UART ready (FFE1)");
-    } catch (e) {
-      pushLog("CONNECT ERROR: " + (e?.message || e));
-    }
-  }, [onRxChunk, pushLog]);
-
-  const disconnect = useCallback(() => {
-    try { deviceRef.current?.gatt?.disconnect?.(); } catch {}
-    serverRef.current = null;
-    txrxRef.current = null;
-    setConnected(false);
-    pushLog("BLE: disconnected");
-  }, [pushLog]);
-
-  return {
-    supported, connected, deviceName, log,
-    connectClick, disconnect,
-    setTMin, setTMax, startDevice, toStandby, toReady,
-    getShotCount, getShotTimeById, getState,
-    pushLog,
+      .catch((e) =>
+        pushLog("TX ERROR: " + (e?.message || String(e)))
+      );
+    return writeQRef.current;
   };
-}
 
-/* ========= UI ========= */
-export default function App() {
-  const [modeUi, setModeUi] = useState("fixed");
+  /* ---- protocol state for exercise ---- */
+
+  const [mode, setMode] = useState("fixed"); // fixed / random
   const [running, setRunning] = useState(false);
-  const [shots, setShots] = useState([]);
-  const [devState, setDevState] = useState(0); // 0 READY, 1 BEEP_WAITING, 2 STARTED
+  const [exeState, setExeState] = useState(0); // 0,1,2
 
-  const ble = useBleHm10();
+  const [shots, setShots] = useState([]); // [{seq, tMs, splitMs}]
 
-  // Поллинг/состояние
-  const pollerRef = useRef(null);
-  const pollBusyRef = useRef(false);
-  const pollSessionRef = useRef(0);
+  const snumRef = useRef(0);
+  const shotMapRef = useRef({}); // devId -> { ms }
+  const stimeQueueRef = useRef([]); // devId[]
+  const stimeBusyRef = useRef(false);
+  const pollTimerRef = useRef(null);
 
-  // Карта id -> ms (null = бронь), фальстарты
-  const shotsMapRef = useRef(new Map());
-  const fsSetRef = useRef(new Set());
+  const exeLabel = useMemo(() => {
+    if (exeState === 1) return "Отсчёт";
+    if (exeState === 2) return "Упражнение";
+    return "Ожидание";
+  }, [exeState]);
 
-  // SNUM кеш
-  const snumCacheRef = useRef({ value: 0, ts: 0 });
+  const firstShotMs = shots.length ? shots[0].tMs : null;
+  const totalTimeMs = shots.length
+    ? shots[shots.length - 1].tMs
+    : null;
+  const bestSplitMs =
+    shots.length > 1
+      ? Math.min(
+          ...shots
+            .slice(1)
+            .map((s) => s.splitMs)
+            .filter((v) => Number.isFinite(v))
+        )
+      : null;
 
-  // Повтор дочитки забронированных слотов
-  const pendingRef = useRef(new Map()); // id -> tries
-
-  // настройки
-  const TICK_MS = 500;
-  const SNUM_COOLDOWN = 400;
-  const RETRY_PAUSE = 120;
-  const MAX_FILL_RETRIES = 3;
-
-  // helpers
-  const stateText = useMemo(
-    () => (devState === 0 ? "Ожидание" : devState === 1 ? "Отсчёт" : devState === 2 ? "Упражнение" : "—"),
-    [devState]
-  );
-
-  const hasMsValue = useCallback((ms) => {
-    for (const v of shotsMapRef.current.values()) if (v === ms) return true;
-    return false;
-  }, []);
-
-  const rebuildShotsFromMap = useCallback(() => {
-    const ids = Array.from(shotsMapRef.current.keys()).sort((a, b) => a - b);
-    const arr = [];
-    for (let i = 0; i < ids.length; i++) {
-      const id = ids[i];
-      const curMs = shotsMapRef.current.get(id); // может быть null
-      const prevId = i > 0 ? ids[i - 1] : null;
-      const prevMs = prevId != null ? shotsMapRef.current.get(prevId) : null;
-
-      // сплит между каждой соседней парой; null если одного из значений нет
-      const split = curMs != null && prevMs != null ? curMs - prevMs : null;
-
-      arr.push({
-        id,
-        seq: i + 1,
-        deltaFromBeep: curMs ?? null,
-        split,
-        fs: fsSetRef.current.has(id),
-      });
-    }
-    setShots(arr);
-  }, []);
-
-  const reserveSlot = useCallback(
-    (id, asFalseStart = false) => {
-      if (!shotsMapRef.current.has(id)) {
-        shotsMapRef.current.set(id, null);
-        if (asFalseStart) fsSetRef.current.add(id);
-        pendingRef.current.set(id, 0);
-        rebuildShotsFromMap();
-        ble.pushLog?.(`Reserve slot for id=${id}${asFalseStart ? " [FS]" : ""}`);
-      } else if (asFalseStart) {
-        fsSetRef.current.add(id);
-        rebuildShotsFromMap();
-      }
-    },
-    [ble, rebuildShotsFromMap]
-  );
-
-  const fillSlot = useCallback(
-    (id, ms) => {
-      if (ms == null) return;
-      if (hasMsValue(ms)) {
-        ble.pushLog?.(`Duplicate STIME ignored: id=${id}, ms=${ms}`);
-        return;
-      }
-      shotsMapRef.current.set(id, ms);
-      pendingRef.current.delete(id);
-      rebuildShotsFromMap();
-    },
-    [ble, hasMsValue, rebuildShotsFromMap]
-  );
-
-  const firstShotMs = useMemo(() => shots[0]?.deltaFromBeep ?? null, [shots]);
-  const totalTimeMs = useMemo(
-    () => (shots.length ? shots[shots.length - 1].deltaFromBeep : null),
-    [shots]
-  );
-  const chartData = useMemo(
+  const cadenceData = useMemo(
     () =>
-      shots.map((s) => ({
+      shots.map((s, idx) => ({
         seq: s.seq,
-        tempo: s.seq === 1 ? s.deltaFromBeep : s.split, // <- 1-я точка = first shot, дальше = split
+        val:
+          idx === 0
+            ? s.tMs
+            : s.splitMs != null
+            ? s.splitMs
+            : 0,
       })),
     [shots]
   );
-  
 
-  useEffect(() => () => clearInterval(pollerRef.current), []);
+  /* ---- helpers for shots ---- */
 
-  const findNextPendingId = useCallback((snum) => {
-    for (let id = 1; id <= snum; id++) {
-      if (!shotsMapRef.current.has(id)) return id;
-      if (shotsMapRef.current.get(id) == null) return id;
+  const rebuildShotsFromMap = () => {
+    const entries = Object.entries(shotMapRef.current)
+      .map(([devIdStr, v]) => ({
+        devId: parseInt(devIdStr, 10),
+        ms: v.ms,
+      }))
+      .sort((a, b) => a.devId - b.devId);
+
+    const ui = [];
+    let prevMs = null;
+    for (let i = 0; i < entries.length; i++) {
+      const { ms } = entries[i];
+      const seq = i + 1;
+      const split = prevMs == null ? null : ms - prevMs;
+      prevMs = ms;
+      ui.push({ seq, tMs: ms, splitMs: split });
     }
-    return null;
-  }, []);
+    setShots(ui);
+  };
 
-  // Ждём state==2 (Started). Пока 0/1 — собираем фальстарты.
-  const waitUntilBeepAndCollectFS = useCallback(async () => {
-    for (;;) {
-      const state = await ble.getState(); // 0 READY, 1 BEEP_WAITING, 2 STARTED
-      setDevState(state);
-      if (state === 2) {
-        ble.pushLog("STATE=STARTED (2) — начинаем основной опрос");
-        return true;
-      }
-      const snum = await ble.getShotCount();
-      for (let uiId = 1; uiId <= snum; uiId++) reserveSlot(uiId, true);
-      await sleep(200);
+  const kickStimeQueue = () => {
+    if (stimeBusyRef.current) return;
+    const devId = stimeQueueRef.current[0];
+    if (devId == null) return;
+    stimeBusyRef.current = true;
+    // спрашиваем время конкретного выстрела (0-based id)
+    writeLine(`#G_STIME=${devId}`).catch(() => {});
+  };
+
+  const handleSnum = (n) => {
+    if (!Number.isFinite(n)) return;
+    const prev = snumRef.current;
+    snumRef.current = n;
+    if (n <= prev) return;
+
+    // появились новые выстрелы: devId = prev .. n-1
+    for (let devId = prev; devId < n; devId++) {
+      if (shotMapRef.current[devId]) continue;
+      stimeQueueRef.current.push(devId);
     }
-  }, [ble, reserveSlot]);
+    kickStimeQueue();
+  };
 
-  const startPollingShots = useCallback(async () => {
-    if (!ble.connected) {
-      ble.pushLog("Poll: BLE not connected");
+  const handleStime = (ms) => {
+    stimeBusyRef.current = false;
+    const devId = stimeQueueRef.current.shift();
+    if (devId == null) return;
+
+    if (!Number.isFinite(ms)) {
+      pushLog(
+        `Bad STIME for devId=${devId}: ${String(ms)}`
+      );
+      kickStimeQueue();
       return;
     }
-    clearInterval(pollerRef.current);
 
-    pollSessionRef.current += 1;
-    const mySession = pollSessionRef.current;
-
-    shotsMapRef.current.clear();
-    fsSetRef.current.clear();
-    pendingRef.current.clear();
-    snumCacheRef.current = { value: 0, ts: 0 };
-    setShots([]);
-
-    await waitUntilBeepAndCollectFS();
-
-    pollerRef.current = setInterval(async () => {
-      if (pollSessionRef.current !== mySession) return;
-      if (pollBusyRef.current) return;
-
-      pollBusyRef.current = true;
-      try {
-        const state = await ble.getState();
-        setDevState(state);
-
-        const now = Date.now();
-        if (now - snumCacheRef.current.ts >= SNUM_COOLDOWN) {
-          const s = await ble.getShotCount();
-          snumCacheRef.current = { value: s, ts: now };
-        }
-        const snum = snumCacheRef.current.value;
-        if (snum <= 0) return;
-
-        const nextId = findNextPendingId(snum);
-        if (!nextId) return;
-
-        let { ms, err } = await ble.getShotTimeById(nextId);
-
-        if (ms != null) {
-          fillSlot(nextId, ms);
-          return;
-        }
-
-        if (!shotsMapRef.current.has(nextId)) reserveSlot(nextId);
-
-        const tries = (pendingRef.current.get(nextId) || 0) + 1;
-        pendingRef.current.set(nextId, tries);
-
-        if (err != null && isRetryableLgErr(err) && tries < MAX_FILL_RETRIES) {
-          ble.pushLog(`Retry STIME id=${nextId} (${tries}/${MAX_FILL_RETRIES})`);
-          await sleep(RETRY_PAUSE);
-          const again = await ble.getShotTimeById(nextId);
-          if (again.ms != null) {
-            fillSlot(nextId, again.ms);
-            return;
-          }
-        }
-
-        if (tries >= MAX_FILL_RETRIES) {
-          ble.pushLog(`Give up STIME id=${nextId} after ${tries} tries`);
-        }
-      } catch (e) {
-        ble.pushLog("Poll error: " + (e?.message || e));
-      } finally {
-        pollBusyRef.current = false;
+    // защита от дублей по миллисекундам
+    for (const v of Object.values(shotMapRef.current)) {
+      if (v.ms === ms) {
+        pushLog(
+          `Duplicate STIME ignored: devId=${devId}, ms=${ms}`
+        );
+        kickStimeQueue();
+        return;
       }
-    }, TICK_MS);
-
-    ble.pushLog("Poll: started");
-  }, [ble, fillSlot, findNextPendingId, waitUntilBeepAndCollectFS, reserveSlot]);
-
-  const stopPollingShots = useCallback(() => {
-    clearInterval(pollerRef.current);
-    pollerRef.current = null;
-    pollBusyRef.current = false;
-    pollSessionRef.current += 1;
-    ble.pushLog("Poll: stopped");
-  }, [ble]);
-
-  // Управление
-// const [running, setRunning] = useState(false);
-const runningRef = useRef(false);
-useEffect(() => {
-  runningRef.current = running;
-}, [running]);
-
-const startSession = useCallback(async () => {
-  // если уже идёт сессия — игнорируем повторный клик
-  if (runningRef.current) return;
-
-  if (!ble.connected) {
-    ble.pushLog("Start skipped: BLE not connected");
-    return;
-  }
-
-  runningRef.current = true;
-  setRunning(true);
-
-  // Чистим локальное состояние сессии
-  setShots([]);
-  shotsMapRef.current?.clear?.();
-  fsSetRef.current?.clear?.();
-  pendingRef.current?.clear?.();
-  // если у тебя есть sessionBaseRef/lastShotTsRef и т.п. — можно тут обнулить
-
-  try {
-    // 1) Настройка таймера на устройстве
-    if (modeUi === "fixed") {
-      await ble.writeLine("#S_TMIN=5000");
-      await ble.writeLine("#S_TMAX=5000");
-    } else {
-      // Random 5–10 s
-      await ble.writeLine("#S_TMIN=5000");
-      await ble.writeLine("#S_TMAX=10000");
     }
 
-    // 2) Отправляем старт. ЭТО главная строка — именно она шлёт BEEP
-    await ble.writeLine("#E_STARTT");
-    ble.pushLog("BEEP sent (#E_STARTT)");
-
-    // 3) Если у тебя уже есть функции ожидания STATE=2 и запуска поллинга —
-    // вызываем их, но только если они действительно существуют.
-    if (typeof waitUntilBeepAndCollectFS === "function") {
-      await waitUntilBeepAndCollectFS();
-    }
-    if (typeof startPollingShots === "function") {
-      await startPollingShots();
-    }
-  } catch (e) {
-    ble.pushLog("Start error: " + (e?.message || e));
-    runningRef.current = false;
-    setRunning(false);
-  }
-}, [ble, modeUi, setRunning, setShots, waitUntilBeepAndCollectFS, startPollingShots])
-    // 3. Отправляем BEEP (E_STARTT)
-    await ble.startDevice(); // внутри шлёт #E_STARTT\r
-    ble.pushLog("BEEP sent (#E_STARTT)");
-
-    // 4. Ждём, пока устройство перейдёт в STATE=2 (Started)
-    const ok = await waitUntilBeepAndCollectFS();
-    if (!ok) {
-      throw new Error("waitUntilBeepAndCollectFS returned false");
-    }
-
-    // 5. Запускаем основной опрос (SNUM + STIME)
-    await startPollingShots();
-  } catch (err) {
-    ble.pushLog("Start error: " + (err?.message || err));
-    runningRef.current = false;
-    setRunning(false);
-  }
-}, [
-  ble,
-  modeUi,
-  setRunning,
-  setShots,
-  waitUntilBeepAndCollectFS,
-  startPollingShots,
-]);
-
-
-  const stopOnly = async () => {
-    setRunning(false);
-    stopPollingShots();
+    shotMapRef.current[devId] = { ms };
+    rebuildShotsFromMap();
+    kickStimeQueue();
   };
 
-  const resetAll = async () => {
-    await stopOnly();
-    shotsMapRef.current.clear();
-    fsSetRef.current.clear();
-    pendingRef.current.clear();
+  const handleProtocolLine = (line) => {
+    if (!line) return;
+
+    if (line.startsWith("#G_STATE=")) {
+      const v = parseInt(line.split("=")[1], 10);
+      if (Number.isFinite(v)) {
+        setExeState(v);
+      }
+      return;
+    }
+
+    if (line.startsWith("#G_SNUM=")) {
+      const n = parseInt(line.split("=")[1], 10);
+      handleSnum(n);
+      return;
+    }
+
+    if (line.startsWith("#G_STIME=")) {
+      const ms = parseInt(line.split("=")[1], 10);
+      handleStime(ms);
+      return;
+    }
+
+    if (line.startsWith("#ERR=")) {
+      const info = decodeErr(line);
+      if (info) {
+        pushLog(
+          `ERR ${info.name} (0x${info.code.toString(16)})`
+        );
+      }
+      return;
+    }
+  };
+
+  /* ---- BLE RX handler ---- */
+
+  const handleRxChunk = (value) => {
+    const chunk = new TextDecoder().decode(value);
+    rxBufRef.current += chunk;
+
+    for (;;) {
+      const buf = rxBufRef.current;
+      const iR = buf.indexOf("\r");
+      const iN = buf.indexOf("\n");
+      if (iR < 0 && iN < 0) break;
+      const idx =
+        iR >= 0 && iN >= 0
+          ? Math.min(iR, iN)
+          : Math.max(iR, iN);
+      const line = buf.slice(0, idx).trim();
+      rxBufRef.current = buf.slice(idx + 1);
+      if (!line) continue;
+      pushLog("RX: " + line);
+      handleProtocolLine(line);
+    }
+  };
+
+  /* ---- BLE connect / disconnect ---- */
+
+  const connectBle = async () => {
+    try {
+      const device = await navigator.bluetooth.requestDevice(
+        {
+          acceptAllDevices: true,
+          optionalServices: [FFE0_SERVICE],
+        }
+      );
+      deviceRef.current = device;
+      setBleName(device.name || device.id || "BLE");
+
+      const server = await device.gatt.connect();
+      serverRef.current = server;
+
+      const svc = await server.getPrimaryService(
+        FFE0_SERVICE
+      );
+      const ch = await svc.getCharacteristic(FFE1_CHAR);
+      txCharRef.current = ch;
+
+      if (ch.properties.notify) {
+        await ch.startNotifications();
+        ch.addEventListener(
+          "characteristicvaluechanged",
+          (e) => handleRxChunk(e.target.value)
+        );
+        pushLog("FFE1: notifications started");
+      }
+
+      setBleConnected(true);
+      pushLog("HM-10 UART ready (FFE1)");
+    } catch (e) {
+      pushLog(
+        "CONNECT ERROR: " + (e?.message || String(e))
+      );
+    }
+  };
+
+  const disconnectBle = () => {
+    try {
+      deviceRef.current?.gatt?.disconnect?.();
+    } catch {
+      /* ignore */
+    }
+    serverRef.current = null;
+    txCharRef.current = null;
+    setBleConnected(false);
+    pushLog("BLE: disconnected");
+  };
+
+  /* ---- polling ---- */
+
+  const startPolling = () => {
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+    }
+    pollTimerRef.current = setInterval(() => {
+      if (!bleConnected) return;
+      // лёгкий опрос: состояние + число выстрелов
+      writeLine("#G_SNUM").catch(() => {});
+      writeLine("#G_STATE").catch(() => {});
+    }, 250);
+    pushLog("Poll: started");
+  };
+
+  const stopPolling = () => {
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+      pushLog("Poll: stopped");
+    }
+    stimeQueueRef.current = [];
+    stimeBusyRef.current = false;
+  };
+
+  useEffect(() => {
+    return () => {
+      stopPolling();
+      disconnectBle();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /* ---- START / STOP / RESET ---- */
+
+  const handleStart = async () => {
+    if (!bleConnected) {
+      pushLog("Start skipped: BLE not connected");
+      return;
+    }
+    if (running) return;
+
+    // чистим локальное состояние
+    snumRef.current = 0;
+    shotMapRef.current = {};
+    stimeQueueRef.current = [];
+    stimeBusyRef.current = false;
     setShots([]);
-    setDevState(0);
+    setExeState(0);
+
+    setRunning(true);
+
+    const tMin = mode === "fixed" ? 5000 : 5000;
+    const tMax = mode === "fixed" ? 5000 : 10000;
+
+    try {
+      // сброс устройства перед стартом
+      await writeLine("#S_GRD");
+      await writeLine("#S_STB");
+      pushLog(
+        "Device reset to STANDBY → READY before start"
+      );
+
+      await writeLine(`#S_TMAX=${tMax}`);
+      await writeLine(`#S_TMIN=${tMin}`);
+
+      await writeLine("#E_STARTT");
+      pushLog("BEEP sent (#E_STARTT)");
+    } catch (e) {
+      pushLog(
+        "Start error: " + (e?.message || String(e))
+      );
+    }
+
+    startPolling();
   };
+
+  const handleStop = () => {
+    if (!running) return;
+    setRunning(false);
+    stopPolling();
+    pushLog("Stop");
+  };
+
+  const handleReset = () => {
+    setRunning(false);
+    stopPolling();
+    snumRef.current = 0;
+    shotMapRef.current = {};
+    stimeQueueRef.current = [];
+    stimeBusyRef.current = false;
+    setShots([]);
+    setExeState(0);
+    pushLog("Reset (UI cleared)");
+  };
+
+  /* ====== UI ====== */
 
   return (
     <div className="min-h-screen w-full overflow-x-hidden bg-gradient-to-b from-slate-950 to-slate-900 text-slate-100 px-4 py-6">
       <div className="max-w-6xl mx-auto">
+        {/* header */}
         <div className="flex items-center justify-between mb-6">
           <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">
-            DzenGun STE
+            Laser Timer — MVP UI
           </h1>
           <div className="text-slate-400 text-sm">
-            Supreme Training Experience
+            Web BLE / HM-10
           </div>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          {/* Настройки старта */}
+        {/* top controls */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
+          {/* settings + buttons */}
           <div className="bg-slate-800/60 rounded-2xl shadow-xl p-6 border border-slate-700">
-            <h2 className="text-lg font-semibold mb-3">Настройки старта</h2>
-            <div className="mb-4">
-              <div className="text-sm text-slate-400 mb-2">Режим таймера</div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => setModeUi("fixed")}
-                  className={`px-3 py-2 rounded-xl border font-semibold ${
-                    modeUi === "fixed"
-                      ? "bg-slate-100 text-black border-slate-300"
-                      : "bg-transparent text-white border-slate-600 hover:border-slate-400"
-                  }`}
-                >
-                  Fixed 5 s
-                </button>
-                <button
-                  onClick={() => setModeUi("random")}
-                  className={`px-3 py-2 rounded-xl border font-semibold ${
-                    modeUi === "random"
-                      ? "bg-slate-100 text-black border-slate-300"
-                      : "bg-transparent text-white border-slate-600 hover:border-slate-400"
-                  }`}
-                >
-                  Random 5–10 s
-                </button>
-              </div>
-            </div>
+            <h2 className="text-lg font-semibold mb-3">
+              Настройки старта
+            </h2>
 
-            <div className="flex flex-wrap items-center gap-3 pt-2">
-              <button
-                onClick={startSession}
-                disabled={running}
-                className={`px-5 py-2.5 rounded-2xl font-semibold shadow-lg transition ${
-                  running
-                    ? "bg-slate-700 text-slate-500 cursor-not-allowed"
-                    : "bg-emerald-500 text-black hover:bg-emerald-400 active:bg-emerald-600"
-                }`}
-              >
-                START
-              </button>
-
-              <button
-                onClick={stopOnly}
-                className="px-5 py-2.5 rounded-2xl font-semibold border border-slate-500 text-black bg-slate-100 hover:bg-slate-200 transition"
-              >
-                Stop
-              </button>
-
-              <button
-                onClick={resetAll}
-                className="px-5 py-2.5 rounded-2xl font-semibold border border-slate-500 text-black bg-slate-100 hover:bg-slate-200 transition"
-              >
-                Reset
-              </button>
-            </div>
-          </div>
-
-          {/* Статус + BLE */}
-          <div className="bg-slate-800/60 rounded-2xl shadow-xl p-6 border border-slate-700">
-            <h2 className="text-lg font-semibold mb-3">Статус</h2>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="col-span-2 flex items-center justify-between">
-                <Row k="Состояние" v={running ? stateText : "Ожидание"} ok={running} />
-                <Row
-                  k="BLE"
-                  v={ble.connected ? `Подключено • ${ble.deviceName || ""}` : "Отключено"}
-                  ok={ble.connected}
-                />
-              </div>
-
-              <div className="col-span-2 grid grid-cols-3 gap-3 mt-2">
-                <StatCard label="First Shot" value={firstShotMs != null ? msFmt(firstShotMs) : "—"} />
-                <StatCard label="# Shots" value={String(shots.length)} />
-                <StatCard label="Total Time" value={totalTimeMs != null ? msFmt(totalTimeMs) : "—"} />
-              </div>
-
-              <div className="col-span-2">
-                <div className="flex flex-wrap gap-2 mb-3">
+            <div className="space-y-4">
+              <div>
+                <div className="text-sm text-slate-400 mb-2">
+                  Режим
+                </div>
+                <div className="flex gap-2">
                   <button
-                    type="button"
-                    onClick={ble.connectClick}
-                    disabled={!ble.supported || ble.connected}
-                    className={`px-4 py-2 rounded-2xl font-semibold shadow ${
-                      ble.connected
-                        ? "bg-slate-700 text-slate-400"
-                        : "bg-emerald-500 text-black hover:bg-emerald-400"
+                    onClick={() => setMode("fixed")}
+                    className={`px-3 py-2 rounded-xl border font-semibold ${
+                      mode === "fixed"
+                        ? "bg-slate-100 text-black border-slate-300"
+                        : "bg-transparent text-white border-slate-600 hover:border-slate-400"
                     }`}
                   >
-                    {ble.connected ? "Подключено" : "Подключить"}
-                    {ble.deviceName ? ` • ${ble.deviceName}` : ""}
+                    Fixed 5 s
                   </button>
-
                   <button
-                    type="button"
-                    onClick={ble.disconnect}
-                    disabled={!ble.connected}
-                    className="px-4 py-2 rounded-2xl font-semibold border border-slate-500 text-black bg-slate-100 hover:bg-slate-200"
+                    onClick={() => setMode("random")}
+                    className={`px-3 py-2 rounded-xl border font-semibold ${
+                      mode === "random"
+                        ? "bg-slate-100 text-black border-slate-300"
+                        : "bg-transparent text-white border-slate-600 hover:border-slate-400"
+                    }`}
                   >
-                    Отключить
+                    Random 5–10 s
                   </button>
-                </div>
-
-                <div className="text-xs text-slate-400">
-                  <div className="mb-1">Лог обмена:</div>
-                  <div className="h-56 overflow-auto bg-slate-900/60 border border-slate-700 rounded-lg p-2 whitespace-pre-wrap">
-                    {ble.log.map((l, i) => (
-                      <div key={i}>{l}</div>
-                    ))}
-                  </div>
                 </div>
               </div>
+
+              <div className="flex flex-wrap items-center gap-3 pt-2">
+                <button
+                  onClick={handleStart}
+                  disabled={running || !bleConnected}
+                  className={`px-5 py-2.5 rounded-2xl font-semibold shadow-lg transition ${
+                    running || !bleConnected
+                      ? "bg-slate-700 text-slate-500 cursor-not-allowed"
+                      : "bg-emerald-500 text-black hover:bg-emerald-400 active:bg-emerald-600"
+                  }`}
+                >
+                  START
+                </button>
+
+                <button
+                  onClick={handleStop}
+                  className="px-5 py-2.5 rounded-2xl font-semibold border border-slate-500 text-black bg-slate-100 hover:bg-slate-200 transition"
+                >
+                  Stop
+                </button>
+
+                <button
+                  onClick={handleReset}
+                  className="px-5 py-2.5 rounded-2xl font-semibold border border-slate-500 text-black bg-slate-100/80 hover:bg-slate-200 transition"
+                >
+                  Reset
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* status */}
+          <div className="bg-slate-800/60 rounded-2xl shadow-xl p-6 border border-slate-700 lg:col-span-2">
+            <h2 className="text-lg font-semibold mb-3">
+              Статус
+            </h2>
+
+            <div className="flex flex-wrap justify-between items-center mb-4">
+              <div className="flex items-center gap-1 text-sm">
+                <span className="text-slate-400">
+                  Состояние:
+                </span>
+                <span className="ml-1 font-medium text-emerald-400">
+                  {exeLabel}
+                </span>
+              </div>
+              <div className="flex items-center gap-1 text-sm">
+                <span className="text-slate-400">BLE:</span>
+                <span
+                  className={
+                    "ml-1 font-medium " +
+                    (bleConnected
+                      ? "text-emerald-400"
+                      : "text-rose-300")
+                  }
+                >
+                  {bleConnected
+                    ? `Подключено • ${bleName}`
+                    : "Отключено"}
+                </span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-3">
+              <StatCard
+                label="First Shot"
+                value={
+                  firstShotMs != null
+                    ? msFmt(firstShotMs)
+                    : "—"
+                }
+              />
+              <StatCard
+                label="# Shots"
+                value={String(shots.length)}
+              />
+              <StatCard
+                label="Total Time"
+                value={
+                  totalTimeMs != null
+                    ? msFmt(totalTimeMs)
+                    : "—"
+                }
+              />
             </div>
           </div>
         </div>
 
-        {/* Таблица и график */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
+        {/* BLE panel + log */}
+        <div className="bg-slate-800/60 rounded-2xl shadow-xl p-6 border border-slate-700 mb-4">
+          <h2 className="text-lg font-semibold mb-3">
+            BLE
+          </h2>
+
+          {!bleSupported && (
+            <p className="text-red-300 mb-3">
+              Web Bluetooth недоступен. Нужен Chrome / Edge
+              (HTTPS или localhost).
+            </p>
+          )}
+
+          <div className="flex flex-wrap gap-2 mb-3">
+            <button
+              type="button"
+              onClick={connectBle}
+              disabled={!bleSupported || bleConnected}
+              className={`px-4 py-2 rounded-2xl font-semibold shadow ${
+                bleConnected
+                  ? "bg-slate-700 text-slate-400"
+                  : "bg-emerald-500 text-black hover:bg-emerald-400"
+              }`}
+            >
+              {bleConnected
+                ? `Подключено • ${bleName}`
+                : "Подключить"}
+            </button>
+            <button
+              onClick={disconnectBle}
+              disabled={!bleConnected}
+              className="px-4 py-2 rounded-2xl font-semibold border border-slate-500 text-black bg-slate-100 hover:bg-slate-200"
+            >
+              Отключить
+            </button>
+          </div>
+
+          <div className="text-xs text-slate-400">
+            <div className="mb-1">Лог обмена:</div>
+            <div className="h-48 overflow-auto bg-slate-900/60 border border-slate-700 rounded-lg p-2 whitespace-pre-wrap">
+              {log.map((l, i) => (
+                <div key={i}>{l}</div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* shots + chart */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          {/* table */}
           <div className="lg:col-span-2 bg-slate-800/60 rounded-2xl shadow-xl p-4 md:p-6 border border-slate-700">
-            <h2 className="text-lg font-semibold mb-3">Выстрелы</h2>
+            <h2 className="text-lg font-semibold mb-3">
+              Выстрелы
+            </h2>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="text-slate-300/80">
                   <tr>
-                    <th className="text-left font-medium py-2">#</th>
-                    <th className="text-left font-medium py-2">t от beep</th>
-                    <th className="text-left font-medium py-2">Split</th>
+                    <th className="text-left font-medium py-2">
+                      #
+                    </th>
+                    <th className="text-left font-medium py-2">
+                      t от beep
+                    </th>
+                    <th className="text-left font-medium py-2">
+                      Split
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
                   {shots.map((s) => (
-                    <tr key={s.id} className="border-t border-slate-700/60">
-                      <td className="py-2 tabular-nums">{s.seq}</td>
+                    <tr
+                      key={s.seq}
+                      className="border-t border-slate-700/60"
+                    >
                       <td className="py-2 tabular-nums">
-                        {s.fs ? "FS" : msFmt(s.deltaFromBeep)}
+                        {s.seq}
                       </td>
                       <td className="py-2 tabular-nums">
-                        {s.split != null ? msFmt(s.split) : "—"}
+                        {msFmt(s.tMs)}
+                      </td>
+                      <td className="py-2 tabular-nums">
+                        {s.splitMs != null
+                          ? msFmt(s.splitMs)
+                          : "—"}
                       </td>
                     </tr>
                   ))}
                   {shots.length === 0 && (
                     <tr>
-                      <td colSpan="3" className="py-6 text-center text-slate-400">
-                        Нажми START — устройство подаст beep и начнётся опрос.
+                      <td
+                        colSpan="3"
+                        className="py-6 text-center text-slate-400"
+                      >
+                        Нажми START — устройство подаст beep и
+                        начнётся опрос.
                       </td>
                     </tr>
                   )}
@@ -705,58 +657,87 @@ const startSession = useCallback(async () => {
             </div>
           </div>
 
+          {/* chart */}
           <div className="bg-slate-800/60 rounded-2xl shadow-xl p-4 md:p-6 border border-slate-700">
-            <h2 className="text-lg font-semibold mb-3">График темпа</h2>
+            <h2 className="text-lg font-semibold mb-3">
+              График темпа
+            </h2>
             <div className="h-64">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartData} margin={{ top: 10, right: 20, left: 0, bottom: 10 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                  <XAxis dataKey="seq" stroke="#94a3b8" tick={{ fill: "#94a3b8" }} />
-                  <YAxis stroke="#94a3b8" tick={{ fill: "#94a3b8" }}
-                         tickFormatter={(v) => `${(v / 1000).toFixed(2)}s`} />
-                 <Tooltip
-  formatter={(v, _name, ctx) => {
-    const seq = ctx?.payload?.seq;
-    const label = seq === 1 ? "First Shot" : "Split";
-    return [msFmt(Number(v)), label];
-  }}
-  labelFormatter={(l) => `#${l}`}
-  contentStyle={{ background: "#0f172a", border: "1px solid #334155", color: "#e2e8f0" }}
-/>
-<Line type="monotone" dataKey="tempo" name="Tempo" dot stroke="#22c55e" />
-
+              <ResponsiveContainer
+                width="100%"
+                height="100%"
+              >
+                <LineChart
+                  data={cadenceData}
+                  margin={{
+                    top: 10,
+                    right: 20,
+                    left: 0,
+                    bottom: 10,
+                  }}
+                >
+                  <CartesianGrid
+                    strokeDasharray="3 3"
+                    stroke="#334155"
+                  />
+                  <XAxis
+                    dataKey="seq"
+                    stroke="#94a3b8"
+                    tick={{ fill: "#94a3b8" }}
+                  />
+                  <YAxis
+                    stroke="#94a3b8"
+                    tick={{ fill: "#94a3b8" }}
+                    tickFormatter={(v) =>
+                      `${(v / 1000).toFixed(2)}s`
+                    }
+                  />
+                  <Tooltip
+                    formatter={(v) =>
+                      msFmt(Number(v))
+                    }
+                    labelFormatter={(l) => `#${l}`}
+                    contentStyle={{
+                      background: "#0f172a",
+                      border: "1px solid #334155",
+                      color: "#e2e8f0",
+                    }}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="val"
+                    name="First Shot / Split"
+                    dot
+                    stroke="#22c55e"
+                  />
                 </LineChart>
               </ResponsiveContainer>
             </div>
             <div className="text-xs text-slate-400 mt-2">
-              График строится до подачи сигнала Stop. Чтобы увидеть результаты - остановите упражнение.
+              Первый выстрел — First Shot (от beep), остальные —
+              Split.
             </div>
           </div>
         </div>
 
+        {/* footer version */}
         <div className="mt-6 text-xs text-slate-500">
-         Тестовая сборка v 0.9803 от 14.11.2025
+          Тестовая сборка v 0.9802 от 14.11.2025
         </div>
       </div>
     </div>
   );
 }
 
-/* ========= small UI bits ========= */
-function Row({ k, v, ok }) {
-  return (
-    <div className="flex items-center gap-2">
-  <div className="text-slate-400 text-sm">{k}:</div>
-  <div className={`text-sm font-medium ${ok ? "text-emerald-400" : "text-slate-300"}`}>{v}</div>
-</div>
+/* small presentational component */
 
-  );
-}
 function StatCard({ label, value }) {
   return (
     <div className="bg-slate-900/60 border border-slate-700 rounded-xl p-3">
       <div className="text-xs text-slate-400">{label}</div>
-      <div className="text-lg font-semibold tabular-nums">{value}</div>
+      <div className="text-lg font-semibold tabular-nums">
+        {value}
+      </div>
     </div>
   );
 }
