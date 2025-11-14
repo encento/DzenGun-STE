@@ -799,7 +799,7 @@ export default function App() {
 
         {/* footer version */}
         <div className="mt-6 text-xs text-slate-500">
-          Тестовая сборка v 0.9803 от 14.11.2025
+          Тестовая сборка v 0.9804 от 14.11.2025
         </div>
       </div>
     </div>
