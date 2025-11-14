@@ -14,13 +14,13 @@ import {
   Tooltip,
 } from "recharts";
 
-/* ===== utils ===== */
-
-const msFmt = (ms) =>
-  Number.isFinite(ms) ? (ms / 1000).toFixed(2) + " s" : "—";
+/* ========= helpers & protocol ========= */
 
 const FFE0_SERVICE = "0000ffe0-0000-1000-8000-00805f9b34fb";
 const FFE1_CHAR = "0000ffe1-0000-1000-8000-00805f9b34fb";
+
+const msFmt = (ms) =>
+  Number.isFinite(ms) ? (ms / 1000).toFixed(2) + " s" : "—";
 
 const COM_ERROR_NAMES = {
   0x00: "OK",
@@ -51,10 +51,27 @@ function decodeErr(line) {
   return { code, name };
 }
 
-/* ===== main component ===== */
+function recalcSplits(arr) {
+  let lastTime = null;
+  for (let i = 0; i < arr.length; i++) {
+    const s = arr[i];
+    if (s.isFs || s.tMs == null) {
+      s.splitMs = null;
+      continue;
+    }
+    if (lastTime == null) {
+      s.splitMs = null;
+    } else {
+      s.splitMs = s.tMs - lastTime;
+    }
+    lastTime = s.tMs;
+  }
+}
+
+/* ========= main component ========= */
 
 export default function App() {
-  /* ---- BLE low-level state ---- */
+  /* ---- BLE state ---- */
 
   const [bleSupported] = useState(!!navigator.bluetooth);
   const [bleConnected, setBleConnected] = useState(false);
@@ -87,79 +104,50 @@ export default function App() {
     return writeQRef.current;
   };
 
-  /* ---- протокол упражнения ---- */
+  /* ---- exercise state ---- */
 
   const [mode, setMode] = useState("fixed"); // fixed / random
   const [running, setRunning] = useState(false);
-  const [exeState, setExeState] = useState(0); // 0 READY, 1 BEEP_WAITING, 2 STARTED
+  const [exeState, setExeState] = useState(0); // 0 READY,1 BEEP_WAIT,2 STARTED
   const [shotCount, setShotCount] = useState(0);
+  const [shots, setShots] = useState([]); // [{seq,tMs,splitMs,isFs}]
 
-  const [shots, setShots] = useState([]); // [{seq, tMs, splitMs}]
+  const exeStateRef = useRef(0);
+  const lastSnumRef = useRef(0);
+
+  const shotsRef = useRef([]);
+  const stimeQueueRef = useRef([]); // devId'ы
+  const stimePendingRef = useRef(null);
+  const stimeFetchedRef = useRef(new Set()); // devId'ы, для которых уже есть STIME
 
   const pollTimerRef = useRef(null);
 
-  // "ожидальщики" для одного ответа (SNUM/STIME)
-  const waitersRef = useRef([]);
-
-  /* ---- helpers for waiters ---- */
-
-  const addWaiter = (matcher, timeoutMs = 1000) =>
-    new Promise((resolve, reject) => {
-      const w = {
-        matcher,
-        resolve,
-        reject,
-        timeoutId: null,
-      };
-      w.timeoutId = setTimeout(() => {
-        const idx = waitersRef.current.indexOf(w);
-        if (idx >= 0) waitersRef.current.splice(idx, 1);
-        reject(new Error("timeout"));
-      }, timeoutMs);
-      waitersRef.current.push(w);
+  const updateShots = (updater) => {
+    setShots((prev) => {
+      const base = [...prev];
+      const next = updater(base);
+      shotsRef.current = next;
+      return next;
     });
-
-  const dispatchWaiters = (line) => {
-    const arr = waitersRef.current;
-    for (let i = 0; i < arr.length; i++) {
-      const w = arr[i];
-      const res = w.matcher(line);
-      if (res === null || res === undefined) continue;
-      arr.splice(i, 1);
-      clearTimeout(w.timeoutId);
-      w.resolve(res);
-      return true; // линия "съедена" waiter'ом
-    }
-    return false;
   };
 
-  const waitForSnumOnce = () =>
-    addWaiter((line) => {
-      if (!line.startsWith("#G_SNUM=")) return null;
-      const n = parseInt(line.split("=")[1], 10);
-      if (!Number.isFinite(n)) return null;
-      setShotCount(n);
-      return n;
-    });
+  /* ---- metrics ---- */
 
-  const waitForStimeOnce = () =>
-    addWaiter((line) => {
-      if (!line.startsWith("#G_STIME=")) return null;
-      const ms = parseInt(line.split("=")[1], 10);
-      if (!Number.isFinite(ms)) return null;
-      return ms;
-    });
+  const nonFsShots = useMemo(
+    () => shots.filter((s) => !s.isFs && s.tMs != null),
+    [shots]
+  );
 
-  /* ---- метрики ---- */
-
-  const firstShotMs = shots.length ? shots[0].tMs : null;
-  const totalTimeMs = shots.length
-    ? shots[shots.length - 1].tMs
+  const firstShotMs = nonFsShots.length
+    ? nonFsShots[0].tMs
+    : null;
+  const totalTimeMs = nonFsShots.length
+    ? nonFsShots[nonFsShots.length - 1].tMs
     : null;
   const bestSplitMs =
-    shots.length > 1
+    nonFsShots.length > 1
       ? Math.min(
-          ...shots
+          ...nonFsShots
             .slice(1)
             .map((s) => s.splitMs)
             .filter((v) => Number.isFinite(v))
@@ -168,14 +156,13 @@ export default function App() {
 
   const cadenceData = useMemo(
     () =>
-      shots.map((s, idx) => ({
+      shots.map((s) => ({
         seq: s.seq,
-        val:
-          idx === 0
-            ? s.tMs
-            : s.splitMs != null
-            ? s.splitMs
-            : 0,
+        val: s.isFs
+          ? null
+          : s.seq === 1
+          ? s.tMs
+          : s.splitMs,
       })),
     [shots]
   );
@@ -186,29 +173,126 @@ export default function App() {
     return "Ожидание";
   }, [exeState]);
 
-  /* ---- RX handler ---- */
+  /* ---- STIME queue processing ---- */
+
+  function processStimeQueue() {
+    if (stimePendingRef.current != null) return;
+    const devId = stimeQueueRef.current.shift();
+    if (devId == null) return;
+    stimePendingRef.current = devId;
+
+    writeLine(`#G_STIME=${devId}`).catch((e) => {
+      pushLog(
+        "STIME TX error: " + (e?.message || String(e))
+      );
+      stimePendingRef.current = null;
+    });
+  }
+
+  /* ---- protocol line handler ---- */
 
   const handleProtocolLine = (line) => {
     if (!line) return;
 
-    // сначала даём шанс waiter'ам
-    if (dispatchWaiters(line)) return;
-
     if (line.startsWith("#G_STATE=")) {
       const v = parseInt(line.split("=")[1], 10);
-      if (Number.isFinite(v)) setExeState(v);
+      if (Number.isFinite(v)) {
+        exeStateRef.current = v;
+        setExeState(v);
+      }
       return;
     }
 
     if (line.startsWith("#G_SNUM=")) {
       const n = parseInt(line.split("=")[1], 10);
-      if (Number.isFinite(n)) setShotCount(n);
+      if (!Number.isFinite(n)) return;
+
+      setShotCount(n);
+
+      const prev = lastSnumRef.current;
+      lastSnumRef.current = n;
+
+      // новое упражнение / сброс — просто обновляем счётчик
+      if (n <= prev) return;
+
+      const isFsNow = exeStateRef.current !== 2;
+
+      for (let devId = prev; devId < n; devId++) {
+        const seq = devId + 1;
+
+        // создаём/обновляем слот выстрела
+        updateShots((arr) => {
+          while (arr.length < seq) {
+            arr.push({
+              seq: arr.length + 1,
+              tMs: null,
+              splitMs: null,
+              isFs: false,
+            });
+          }
+          const shot = arr[seq - 1];
+          // помечаем FS, если произошёл до STARTED
+          if (isFsNow) shot.isFs = true;
+          return arr;
+        });
+
+        if (!stimeFetchedRef.current.has(devId)) {
+          stimeQueueRef.current.push(devId);
+        }
+      }
+
+      processStimeQueue();
       return;
     }
 
     if (line.startsWith("#G_STIME=")) {
-      // сюда обычно не попадём (STIME заберёт waiter),
-      // но оставим на всякий случай
+      const ms = parseInt(line.split("=")[1], 10);
+      if (!Number.isFinite(ms)) return;
+
+      const devId = stimePendingRef.current;
+      if (devId == null) {
+        pushLog(
+          "Unexpected STIME without pending id: " + ms
+        );
+        return;
+      }
+
+      stimePendingRef.current = null;
+
+      if (stimeFetchedRef.current.has(devId)) {
+        pushLog(
+          `Duplicate STIME ignored: id=${devId}, ms=${ms}`
+        );
+        processStimeQueue();
+        return;
+      }
+
+      stimeFetchedRef.current.add(devId);
+
+      const seq = devId + 1;
+
+      updateShots((arr) => {
+        while (arr.length < seq) {
+          arr.push({
+            seq: arr.length + 1,
+            tMs: null,
+            splitMs: null,
+            isFs: false,
+          });
+        }
+        const shot = arr[seq - 1];
+
+        if (shot.tMs === ms) {
+          processStimeQueue();
+          return arr;
+        }
+
+        shot.tMs = ms;
+        recalcSplits(arr);
+        return arr;
+      });
+
+      processStimeQueue();
       return;
     }
 
@@ -222,6 +306,8 @@ export default function App() {
       return;
     }
   };
+
+  /* ---- RX chunk handler ---- */
 
   const handleRxChunk = (value) => {
     const chunk = new TextDecoder().decode(value);
@@ -303,9 +389,12 @@ export default function App() {
       clearInterval(pollTimerRef.current);
     }
     pollTimerRef.current = setInterval(() => {
-      if (!bleConnected) return;
+      if (!txCharRef.current) return;
+      // основной опрос состояния и количества
       writeLine("#G_STATE").catch(() => {});
       writeLine("#G_SNUM").catch(() => {});
+      // и заодно обслуживаем очередь STIME
+      processStimeQueue();
     }, 250);
     pushLog("Poll: started");
   };
@@ -335,27 +424,34 @@ export default function App() {
     }
     if (running) return;
 
-    // чистим UI
+    // полный сброс внутреннего состояния
+    setRunning(true);
     setShots([]);
+    shotsRef.current = [];
+    stimeQueueRef.current = [];
+    stimePendingRef.current = null;
+    stimeFetchedRef.current = new Set();
+    lastSnumRef.current = 0;
     setShotCount(0);
     setExeState(0);
-
-    setRunning(true);
+    exeStateRef.current = 0;
 
     const tMin = mode === "fixed" ? 5000 : 5000;
     const tMax = mode === "fixed" ? 5000 : 10000;
 
     try {
-      // сброс в READY перед стартом
-      await writeLine("#S_GRD");
+      // 0) сброс устройства в STANDBY → READY
       await writeLine("#S_STB");
+      await writeLine("#S_GRD");
       pushLog(
         "Device reset to STANDBY → READY before start"
       );
 
+      // 1) параметры таймера
       await writeLine(`#S_TMAX=${tMax}`);
       await writeLine(`#S_TMIN=${tMin}`);
 
+      // 2) старт упражнения / beep
       await writeLine("#E_STARTT");
       pushLog("BEEP sent (#E_STARTT)");
     } catch (e) {
@@ -367,70 +463,31 @@ export default function App() {
     startPolling();
   };
 
-  const handleStop = async () => {
+  const handleStop = () => {
     if (!running) return;
     setRunning(false);
     stopPolling();
     pushLog("Stop");
-
-    if (!bleConnected) return;
-
-    try {
-      // 1) узнаём сколько выстрелов накоплено
-      await writeLine("#G_SNUM");
-      const total = await waitForSnumOnce();
-      pushLog(`Stop: device reports ${total} shots`);
-
-      // 2) по очереди забираем времена STIME=0..N-1
-      const times = [];
-      for (let devId = 0; devId < total; devId++) {
-        await writeLine(`#G_STIME=${devId}`);
-        const ms = await waitForStimeOnce();
-
-        if (!Number.isFinite(ms)) continue;
-
-        // защита от дублей по миллисекундам
-        if (times.includes(ms)) {
-          pushLog(
-            `Duplicate STIME ignored: id=${devId}, ms=${ms}`
-          );
-          continue;
-        }
-
-        times.push(ms);
-      }
-
-      times.sort((a, b) => a - b);
-
-      const ui = [];
-      let prev = null;
-      for (let i = 0; i < times.length; i++) {
-        const ms = times[i];
-        const seq = i + 1;
-        const split = prev == null ? null : ms - prev;
-        prev = ms;
-        ui.push({ seq, tMs: ms, splitMs: split });
-      }
-
-      setShots(ui);
-      setShotCount(ui.length);
-    } catch (e) {
-      pushLog(
-        "Stop fetch error: " + (e?.message || String(e))
-      );
-    }
+    // очередь STIME уже в основном должна быть пустой,
+    // т.к. мы опрашивали её во время упражнения
   };
 
   const handleReset = () => {
     setRunning(false);
     stopPolling();
     setShots([]);
+    shotsRef.current = [];
+    stimeQueueRef.current = [];
+    stimePendingRef.current = null;
+    stimeFetchedRef.current = new Set();
+    lastSnumRef.current = 0;
     setShotCount(0);
     setExeState(0);
+    exeStateRef.current = 0;
     pushLog("Reset (UI cleared)");
   };
 
-  /* ====== UI ====== */
+  /* ========= UI ========= */
 
   return (
     <div className="min-h-screen w-full overflow-x-hidden bg-gradient-to-b from-slate-950 to-slate-900 text-slate-100 px-4 py-6">
@@ -445,9 +502,9 @@ export default function App() {
           </div>
         </div>
 
-        {/* top controls */}
+        {/* controls */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
-          {/* settings + buttons */}
+          {/* mode + buttons */}
           <div className="bg-slate-800/60 rounded-2xl shadow-xl p-6 border border-slate-700">
             <h2 className="text-lg font-semibold mb-3">
               Настройки старта
@@ -569,7 +626,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* BLE panel + log */}
+        {/* BLE panel */}
         <div className="bg-slate-800/60 rounded-2xl shadow-xl p-6 border border-slate-700 mb-4">
           <h2 className="text-lg font-semibold mb-3">
             BLE
@@ -648,10 +705,14 @@ export default function App() {
                         {s.seq}
                       </td>
                       <td className="py-2 tabular-nums">
-                        {msFmt(s.tMs)}
+                        {s.isFs
+                          ? "FS"
+                          : msFmt(s.tMs)}
                       </td>
                       <td className="py-2 tabular-nums">
-                        {s.splitMs != null
+                        {s.isFs
+                          ? "—"
+                          : s.splitMs != null
                           ? msFmt(s.splitMs)
                           : "—"}
                       </td>
@@ -731,7 +792,7 @@ export default function App() {
             </div>
             <div className="text-xs text-slate-400 mt-2">
               Первый выстрел — First Shot (от beep), остальные —
-              Split.
+              Split. FS — выстрел до beep.
             </div>
           </div>
         </div>
@@ -745,7 +806,7 @@ export default function App() {
   );
 }
 
-/* small presentational component */
+/* small card */
 
 function StatCard({ label, value }) {
   return (
