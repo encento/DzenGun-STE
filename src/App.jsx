@@ -584,6 +584,11 @@ const chartData = useMemo(() => {
             </div>
 
             <div className="text-xs text-slate-400">
+              <div className="mb-1">Лог обмена:</div>
+              <div className="h-40 overflow-auto bg-slate-950/80 border border-slate-700 rounded-lg p-2 whitespace-pre-wrap">
+                {ble.log.map((l, i) => (
+                  <div key={i}>{l}</div>
+                ))}
               </div>
             </div>
           </div>
