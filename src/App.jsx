@@ -699,7 +699,7 @@ const chartData = useMemo(() => {
         </div>
 
         <div className="mt-4 text-xs text-slate-500">
-          Build v0.9808
+          Build v0.9809
         </div>
       </div>
     </div>
