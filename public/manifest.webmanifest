@@ -1,10 +1,18 @@
 {
+<<<<<<< Updated upstream
   "name": "Dzen Gun STE",
   "short_name": "DzenGun",
   "start_url": "/DzenGun-STE/",
+=======
+  "name": "DzenGun STE",
+  "short_name": "DzenGun",
+  "start_url": "/DzenGun-STE/",
+  "scope": "/DzenGun-STE/",
+>>>>>>> Stashed changes
   "display": "standalone",
   "background_color": "#020617",
   "theme_color": "#020617",
+  "orientation": "portrait",
   "icons": [
     {
       "src": "/DzenGun-STE/icons/icon-192.png",
@@ -12,7 +20,11 @@
       "type": "image/png"
     },
     {
+<<<<<<< Updated upstream
       "src": "//DzenGun-STE/icons/icon-512.png",
+=======
+      "src": "/DzenGun-STE/icons/icon-512.png",
+>>>>>>> Stashed changes
       "sizes": "512x512",
       "type": "image/png"
     }
