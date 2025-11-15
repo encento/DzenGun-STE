@@ -584,11 +584,20 @@ const chartData = useMemo(() => {
             </div>
 
             <div className="text-xs text-slate-400">
-              <div className="mb-1">Лог обмена:</div>
-              <div className="h-40 overflow-auto bg-slate-950/80 border border-slate-700 rounded-lg p-2 whitespace-pre-wrap">
-                {ble.log.map((l, i) => (
-                  <div key={i}>{l}</div>
-                ))}
+            <Card title="BLE">
+  {/* ... кнопки Подключить / Отключить, статус и т.п. */}
+
+  <div className="log-title">Лог обмена:</div>
+
+  <div className="ble-log">
+    <textarea
+      readOnly
+      value={log.join("\n")}
+      // тут твои остальные пропсы
+    />
+  </div>
+</Card>
+
               </div>
             </div>
           </div>
