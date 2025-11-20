@@ -1,0 +1,22 @@
+{
+  "name": "DzenGun STE",
+  "short_name": "DzenGun",
+  "start_url": "/DzenGun-STE/",
+  "scope": "/DzenGun-STE/",
+  "display": "standalone",
+  "background_color": "#020617",
+  "theme_color": "#020617",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/DzenGun-STE/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/DzenGun-STE/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
