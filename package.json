@@ -24,8 +24,6 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-
-    // вот этот скрипт нам нужен
     "build:android": "vite build --config vite.config.android.js"
   },
   
