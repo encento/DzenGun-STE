@@ -556,8 +556,7 @@ const chartData = useMemo(() => {
 
             {!ble.supported && (
               <p className="text-xs text-rose-300 mb-2">
-                Web Bluetooth недоступен. Нужен Chrome/Edge (HTTPS или
-                localhost).
+                Подключичите устройство
               </p>
             )}
 
@@ -699,7 +698,7 @@ const chartData = useMemo(() => {
         </div>
 
         <div className="mt-4 text-xs text-slate-500">
-                   Build v0.9809 - APK ready
+                   Build v0.9912 - APK native ready
         </div>
       </div>
     </div>
