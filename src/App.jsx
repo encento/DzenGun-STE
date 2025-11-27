@@ -603,7 +603,7 @@ const chartData = useMemo(() => {
                   <tr>
                     <th className="text-left font-medium py-2">#</th>
                     <th className="text-left font-medium py-2">
-                      t от beep
+                      t выстрела
                     </th>
                     <th className="text-left font-medium py-2">
                       Split
@@ -633,8 +633,7 @@ const chartData = useMemo(() => {
                         colSpan={3}
                         className="py-6 text-center text-slate-400"
                       >
-                        Нажми START — устройство подаст beep и
-                        начнётся опрос.
+                       Здесь появятся ваши выстрелы после старта упражнения.
                       </td>
                     </tr>
                   )}
@@ -691,7 +690,7 @@ const chartData = useMemo(() => {
               </ResponsiveContainer>
             </div>
             <div className="mt-2 text-xs text-slate-400">
-              Первый выстрел — без Split, далее сплиты между
+              Первый выстрел — отправная точка, далее сплиты между
               соседними выстрелами.
             </div>
           </div>
