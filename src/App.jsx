@@ -697,7 +697,7 @@ const chartData = useMemo(() => {
         </div>
 
         <div className="mt-4 text-xs text-slate-500">
-                   Build v0.9912 - APK native ready
+                   Build v0.9913 - APK native ready
         </div>
       </div>
     </div>
