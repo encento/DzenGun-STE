@@ -1,8 +1,10 @@
 import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
 
 export default defineConfig({
-  // было: base: "/DzenGun-STE/",
-  base: "./",           // <-- так будет работать и на GitHub Pages, и из файла
-  plugins: [react()],
+  base: "./", // ← КЛЮЧЕВОЕ. Запрещает Vite ломать пути
+  build: {
+    outDir: "dist-android",      // ← стабильно, не конфликтует
+    assetsDir: "assets",         // ← картинки, css, js будут тут
+    emptyOutDir: true,
+  },
 });
