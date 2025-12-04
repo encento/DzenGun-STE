@@ -1,11 +1,12 @@
 import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
 
 export default defineConfig({
-  root: ".",      // ← обязателен
-  base: "./",     // ← чтобы пути не ломались
+  plugins: [react()],
+  base: "./",
   build: {
     outDir: "dist-android",
-    emptyOutDir: true,
     assetsDir: "assets",
+    emptyOutDir: true,
   }
 });
