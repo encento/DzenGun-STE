@@ -3,15 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-
     <title>DzenGun STE</title>
 
     <!-- Tailwind -->
     <script src="https://cdn.tailwindcss.com"></script>
 
     <!-- Шрифт -->
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap"
-          rel="stylesheet" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
 
     <!-- PWA Manifest -->
     <link rel="manifest" href="./manifest.webmanifest" />
@@ -31,14 +32,12 @@
         color: #e2e8f0;
       }
     </style>
-
   </head>
 
   <body>
     <div id="root"></div>
 
-    <!-- Подключаем файлы, которые Vite создаёт -->
-    <script type="module" src="./assets/index-XXXX.js"></script>
-    <link rel="stylesheet" href="./assets/index-XXXX.css" />
+    <!-- ← ВАЖНО!!! НИЖЕ ВСЕГДА ДОЛЖНО БЫТЬ ИМЕННО ТАК -->
+    <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
