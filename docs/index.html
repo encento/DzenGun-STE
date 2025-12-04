@@ -1,29 +1,43 @@
 <!doctype html>
 <html lang="ru">
   <head>
-    <link rel="manifest" href="/DzenGun-STE/public/manifest.webmanifest" />
-<meta name="theme-color" content="#020617" />
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>DzenGun STE</title>
 
-    <!-- Tailwind через CDN для простого прототипа -->
+    <!-- Tailwind -->
     <script src="https://cdn.tailwindcss.com"></script>
 
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet"/>
+    <!-- Шрифт -->
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="./manifest.webmanifest" />
+
+    <!-- Иконки -->
+    <link rel="icon" href="./icons/icon-192.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="./icons/icon-512.png" />
+
     <style>
-      html, body, #root { height: 100%; }
-      body { margin: 0; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:#0b1220; color:#e2e8f0; }
+      html, body, #root {
+        height: 100%;
+      }
+      body {
+        margin: 0;
+        font-family: Inter, system-ui, sans-serif;
+        background: #0b1220;
+        color: #e2e8f0;
+      }
     </style>
-    <script type="module" crossorigin src="./assets/index-2XbdzOBo.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-CtjHNVbM.css">
   </head>
+
   <body>
     <div id="root"></div>
-    <!-- ОБЯЗАТЕЛЬНО: подключаем входной файл Vite -->
 
+    <!-- ← ВАЖНО!!! НИЖЕ ВСЕГДА ДОЛЖНО БЫТЬ ИМЕННО ТАК -->
+    <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
-
-
-
