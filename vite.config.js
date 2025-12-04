@@ -1,10 +1,14 @@
 import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
 
 export default defineConfig({
-  base: "./", // ← КЛЮЧЕВОЕ. Запрещает Vite ломать пути
+  plugins: [react()],
+  root: ".",         // корень проекта — здесь index.html
+  publicDir: "public",
+  base: "./",
   build: {
-    outDir: "dist-android",      // ← стабильно, не конфликтует
-    assetsDir: "assets",         // ← картинки, css, js будут тут
+    outDir: "dist",      // обычный build
+    assetsDir: "assets",
     emptyOutDir: true,
   },
 });
