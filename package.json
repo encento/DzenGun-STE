@@ -4,14 +4,10 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "lint": "eslint .",
-    "preview": "vite preview",
-    "predeploy": "npm run build",
-    "deploy": "gh-pages -d dist",
- "build:android": "vite build --config vite.config.android.js"
-  },
+  "dev": "vite",
+  "build:web": "vite build",
+  "build:android": "vite build --config vite.config.android.js"
+}
 
   "dependencies": {
     "framer-motion": "^12.23.24",
