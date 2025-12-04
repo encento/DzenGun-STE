@@ -1,11 +1,14 @@
-// vite.config.android.js
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
-  base: './',              // ВАЖНО: относительные пути, а не /DzenGun-STE/
+  root: ".",                        // <-- ГЛАВНОЕ
+  publicDir: "public",
+  base: "./",
   build: {
-    outDir: 'dist-android' // отдельная папка для андроид-сборки
-  }
+    outDir: "dist-android",
+    assetsDir: "assets",
+    emptyOutDir: true,
+  },
 });
